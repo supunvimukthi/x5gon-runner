@@ -12,9 +12,9 @@ base_url = 'http://127.0.0.1:8080/'
 
 
 decode_url = http_.HttpOperator(
-    base_url=base_url,
-    endpoint='process/decode_url',
-    method='POST',
+    base_url='http://13.234.76.200:8000/api/v1',
+    endpoint='uri_decoder',
+    method='GET',
     data={},
     headers={},
     response_check=None,
@@ -23,7 +23,7 @@ decode_url = http_.HttpOperator(
     log_response=False,
     auth_type=None,
     conditions=None,
-    request_mapping={'url': 'resource_url'},
+    request_mapping={'url': 'url'},
     response_mapping={
         'filename': 'filename',
         'domain': 'domain',
@@ -53,7 +53,7 @@ copy_to_s3 = http_.HttpOperator(
     auth_type=None,
     conditions=None,
     request_mapping={
-        'filename': 'filename'
+        'domain': 'filename'
     },
     response_mapping={'s3_url': 's3_url'},
     max_retry_count=3
