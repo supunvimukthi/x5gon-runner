@@ -130,5 +130,5 @@ def create_tables():
     conn.commit()
     conn.close()
 
-
+create_tables()
 
