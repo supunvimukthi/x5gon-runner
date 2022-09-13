@@ -1,61 +1,36 @@
-#
-# Licensed to the Apache Software Foundation (ASF) under one
-# or more contributor license agreements.  See the NOTICE file
-# distributed with this work for additional information
-# regarding copyright ownership.  The ASF licenses this file
-# to you under the Apache License, Version 2.0 (the
-# "License"); you may not use this file except in compliance
-# with the License.  You may obtain a copy of the License at
-#
-#   http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing,
-# software distributed under the License is distributed on an
-# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
-# KIND, either express or implied.  See the License for the
-# specific language governing permissions and limitations
-# under the License.
-from typing import Any, Callable, Dict, Optional, Union
-
+from typing import Any, Dict, Optional, Union
+import logging
 import requests
-import tenacity
 from requests.auth import HTTPBasicAuth
 
-from airflow.exceptions import AirflowException
 
-
-class HttpHook():
+class HttpHook:
     """
     Interact with HTTP servers.
 
     :param method: the API method to be called
-    :param http_conn_id: :ref:`http connection<howto/connection:http>` that has the base
-        API url i.e https://www.google.com/ and optional authentication credentials. Default
+    :param base_url: base_url of where the http endpoint is running Default
         headers can also be specified in the Extra field in json format.
     :param auth_type: The auth type for the service
     """
 
-    conn_name_attr = 'http_conn_id'
-    default_conn_name = 'http_default'
-    conn_type = 'http'
-    hook_name = 'HTTP'
-
     def __init__(
         self,
         method: str = 'POST',
-        http_conn_id: str = default_conn_name,
+        base_url: str = "",
         auth_type: Any = HTTPBasicAuth,
     ) -> None:
         super().__init__()
-        self.http_conn_id = http_conn_id
         self.method = method.upper()
-        self.base_url: str = ""
-        self._retry_obj: Callable[..., Any]
+        self.base_url: str = base_url
         self.auth_type: Any = auth_type
+        self.log = logging.getLogger('Http_Operator')
+
+        self.log.setLevel(level=logging.DEBUG)
 
     # headers may be passed through directly or in the "extra" field in the connection
     # definition
-    def get_conn(self, headers: Optional[Dict[Any, Any]] = None) -> requests.Session:
+    def get_session(self, headers: Optional[Dict[Any, Any]] = None) -> requests.Session:
         """
         Returns http session for use with requests
 
@@ -63,26 +38,12 @@ class HttpHook():
         """
         session = requests.Session()
 
-        if self.http_conn_id:
-            conn = self.get_connection(self.http_conn_id)
+        if not self.base_url:
+            raise ValueError('base url is not defined')
 
-            if conn.host and "://" in conn.host:
-                self.base_url = conn.host
-            else:
-                # schema defaults to HTTP
-                schema = conn.schema if conn.schema else "http"
-                host = conn.host if conn.host else ""
-                self.base_url = schema + "://" + host
-
-            if conn.port:
-                self.base_url = self.base_url + ":" + str(conn.port)
-            if conn.login:
-                session.auth = self.auth_type(conn.login, conn.password)
-            if conn.extra:
-                try:
-                    session.headers.update(conn.extra_dejson)
-                except TypeError:
-                    self.log.warning('Connection to %s has invalid extra field.', conn.host)
+        # TODO: handle different authentications
+        # if conn.login:
+        #     session.auth = self.auth_type(conn.login, conn.password)
         if headers:
             session.headers.update(headers)
 
@@ -110,7 +71,7 @@ class HttpHook():
         """
         extra_options = extra_options or {}
 
-        session = self.get_conn(headers)
+        session = self.get_session(headers)
 
         url = self.url_from_endpoint(endpoint)
 
@@ -122,25 +83,11 @@ class HttpHook():
             req = requests.Request(self.method, url, headers=headers, **request_kwargs)
         else:
             # Others use data
-            req = requests.Request(self.method, url, data=data, headers=headers, **request_kwargs)
+            req = requests.Request(self.method, url, json=data, headers=headers, **request_kwargs)
 
         prepped_request = session.prepare_request(req)
         self.log.info("Sending '%s' to url: %s", self.method, url)
         return self.run_and_check(session, prepped_request, extra_options)
-
-    def check_response(self, response: requests.Response) -> None:
-        """
-        Checks the status code and raise an AirflowException exception on non 2XX or 3XX
-        status codes
-
-        :param response: A requests response object
-        """
-        try:
-            response.raise_for_status()
-        except requests.exceptions.HTTPError:
-            self.log.error("HTTP error: %s", response.reason)
-            self.log.error(response.text)
-            raise AirflowException(str(response.status_code) + ":" + response.reason)
 
     def run_and_check(
         self,
@@ -182,34 +129,25 @@ class HttpHook():
                 self.check_response(response)
             return response
 
-        except requests.exceptions.ConnectionError as ex:
-            self.log.warning('%s Tenacity will retry to execute the operation', ex)
+        except Exception as ex:
+            self.log.warning('Error occurred while calling the http endpoint', ex)
             raise ex
 
-    def run_with_advanced_retry(self, _retry_args: Dict[Any, Any], *args: Any, **kwargs: Any) -> Any:
+    def check_response(self, response: requests.Response) -> None:
         """
-        Runs Hook.run() with a Tenacity decorator attached to it. This is useful for
-        connectors which might be disturbed by intermittent issues and should not
-        instantly fail.
+        Checks the status code and raise an exception on non 2XX or 3XX
+        status codes
 
-        :param _retry_args: Arguments which define the retry behaviour.
-            See Tenacity documentation at https://github.com/jd/tenacity
-
-
-        .. code-block:: python
-
-            hook = HttpHook(http_conn_id="my_conn", method="GET")
-            retry_args = dict(
-                wait=tenacity.wait_exponential(),
-                stop=tenacity.stop_after_attempt(10),
-                retry=requests.exceptions.ConnectionError,
-            )
-            hook.run_with_advanced_retry(endpoint="v1/test", _retry_args=retry_args)
-
+        :param response: A requests response object
         """
-        self._retry_obj = tenacity.Retrying(**_retry_args)
-
-        return self._retry_obj(self.run, *args, **kwargs)
+        try:
+            response.raise_for_status()
+            if 'is_error' in response.json() and response.json()['is_error']:
+                raise Exception(response.json()['error_msg'])
+        except requests.exceptions.HTTPError:
+            self.log.error("HTTP error: %s", response.reason)
+            self.log.error(response.text)
+            raise Exception(str(response.status_code) + ":" + response.reason)
 
     def url_from_endpoint(self, endpoint: Optional[str]) -> str:
         """Combine base url with endpoint"""

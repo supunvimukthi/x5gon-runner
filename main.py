@@ -1,92 +1,74 @@
-# This is a sample Python script.
-
-# Press ⌃R to execute it or replace it with your code.
-# Press Double ⇧ to search everywhere for classes, files, tool windows, actions, and settings.
-from pymongo import MongoClient
-import networkx as nx
 import time
+import json
 import ScheduleStatus
 
-import matplotlib.pyplot as plt
+from datetime import datetime
 
-import http
-
-mongo_client = MongoClient("mongodb://localhost:27017/")
-scheduler_db = mongo_client["schedules"]
-
-schedules_collection = scheduler_db["schedules"]
-data_collection = scheduler_db["data"]
-
-mongo_client.list_database_names()
-scheduler_db.list_collection_names()
-
-client = MongoClient()
+from DAG import X5gon_DAG
+from database import create_new_job, update_job_status, update_error, update_retry_count, get_values, get_pending_tasks, \
+    insert_values
 
 
-class Test():
-    def __init__(self, name,age):
-        self.name = name
-        self.age = age
-
-    def name_age(self):
-        return self.name + str(self.age)
-
-
-G = nx.DiGraph()
-G.add_node("ad", obj=Test("supun",21))
-G.add_node("b", obj=Test("supunb",20))
-G.add_node("c", obj=Test("supunc",2))
-G.add_node("node", http_object=Test("supunc",2))
-
-
-nx.draw_planar(G,
-    with_labels=True,
-    node_size=1000,
-    node_color="#ffff8f",
-    width=0.8,
-    font_size=14,
-)
-G.add_edge("ad", "c", test="like")
-G.add_edge("ad", "b", test="dislike")
-list(nx.edge_dfs(G, 'ad'))
-nx.descendants(G, "ad")
-
-
-def get_pending_tasks():
-    pending_tasks = schedules_collection.find({'status': ScheduleStatus.PENDING, "trigger_time": {"lt": time.time() }})
-    pending_tasks = [task for task in pending_tasks]
-    return pending_tasks
-
-
+# limitations: have to define all parameters in request mapping and response mapping
 def run():
     start_time = time.perf_counter()
-    while time.perf_counter() < start_time + 10:
+    while True:
+        # Run scheduler every 10 second for now
+        if time.perf_counter() < (start_time + 10):
+            continue
+
+        start_time = time.perf_counter()
+        print('running once...')
+        # get all pending tasks
         pending_tasks = get_pending_tasks()
         for pending_task in pending_tasks:
-            required_data = data_collection.find({
-                'job_id': pending_task['job_id'],
-                "task_id": pending_task['task_id']
-            })
+            try:
+                # get http operator object related to the pending task
+                current_task = X5gon_DAG.nodes[pending_task[1]]['http_operator']
 
-            result = G.nodes['node']['http_object'].execute(required_data)
+                # retrieving data related to the http operator
 
-            if result == "success":
-                schedules_collection.update({
-                    'job_id': pending_task['job_id'],
-                    "task_id": pending_task['task_id']
-                }, {
-                    'status': ScheduleStatus.COMPLETED
-                })
-            else:
-                schedules_collection.update({
-                    'job_id': pending_task['job_id'],
-                    "task_id": pending_task['task_id']
-                }, {
-                    'status': ScheduleStatus.FAILED
-                })
+                required_keys = list(current_task.request_mapping.keys())
+                required_data = {}
+                if len(required_keys) > 0:
+                    required_data = get_values(pending_task[0], required_keys)
 
-            downstream_nodes = nx.descendants(G, pending_task['task_id'])
+                # execute the http request
+                result = current_task.execute(required_data)
+                if result:
+                    # saving data needed for the task from the result dictionary
+                    values = []
+                    for key in current_task.response_mapping.keys():
+                        if key in result:
+                            values.append((
+                                pending_task[0],
+                                key,
+                                json.dumps({'value': result[key]}),
+                                pending_task[1],
+                                datetime.now().timestamp()
+                            ))
+
+                    insert_values(values)
+
+                    # accessing all downstream task to this task
+                    for next_task_id in X5gon_DAG.successors(pending_task[1]):
+                        # scheduling the task
+                        create_new_job(pending_task[0], next_task_id)
+
+                    # update the current task as completed
+                    update_job_status(pending_task[0], pending_task[1], ScheduleStatus.COMPLETED)
+                else:
+                    # update status as skipped since operator did not satisfy the condition
+                    update_job_status(pending_task[0], pending_task[1], ScheduleStatus.SKIPPED)
+            except Exception as e:
+                print(e)
+                # if retry count is exceeding the max retry count update status as failed
+                if pending_task[4] == current_task.max_retry_count:
+                    update_error(pending_task[0], pending_task[1], str(e))
+                # increase the retry count and keep status as pending to try again
+                else:
+                    update_retry_count(pending_task[0], pending_task[1], pending_task[4] + 1)
+                    update_job_status(pending_task[0], pending_task[1], ScheduleStatus.PENDING)
 
 
-
-
+run()
