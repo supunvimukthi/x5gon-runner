@@ -74,7 +74,7 @@ submit_text_extraction_job = http_.HttpOperator(
     extra_options={},
     log_response=False,
     auth_type=None,
-    conditions={'filetype': 'pdf'},
+    conditions={'filetype': '.pdf'},
     request_mapping={
         'filetype': 'filetype',
         's3_url': 's3_url'
@@ -178,7 +178,7 @@ transcribe = http_.HttpOperator(
     extra_options={},
     log_response=False,
     auth_type=None,
-    conditions={'filetype': 'mp4'},
+    conditions={'filetype': '.mp4'},
     request_mapping={'filetype': 'filetype'},
     response_mapping={},
     max_retry_count=3
